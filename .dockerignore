@@ -1,0 +1,11 @@
+node_modules
+build
+output
+.idea
+.git
+.env
+.env.*
+!.env.example
+deploy
+Dockerfile
+.dockerignore

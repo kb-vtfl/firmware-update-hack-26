@@ -1,0 +1,28 @@
+{
+  "name": "hackaton-26",
+  "version": "1.0.0",
+  "description": "Agent that checks whether charging stations are ready for a firmware upgrade, based on OCPP log exports",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "ui": "npm run build --silent && node --env-file-if-exists=.env build/server.js --open",
+    "start": "npm run build --silent && node --env-file-if-exists=.env build/index.js --watch",
+    "agent": "npm run build --silent && node --env-file-if-exists=.env build/index.js",
+    "agent:analyse": "npm run build --silent && node --env-file-if-exists=.env build/index.js --no-upgrade",
+    "facts": "npm run build && node --env-file-if-exists=.env build/index.js --dry-run",
+    "station": "npm run build --silent && node --env-file-if-exists=.env build/stationCli.js",
+    "deploy:azure": "bash deploy/deploy.sh"
+  },
+  "engines": {
+    "node": ">=22.9"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2"
+  }
+}

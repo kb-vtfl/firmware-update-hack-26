@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Firmware Rollout Control Room</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%23ffda00'/><path d='M18 4 8 18h7l-2 10 11-15h-7z' fill='%230a1222'/></svg>" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo" aria-hidden="true">
+          <svg viewBox="0 0 32 32"><path d="M18 4 8 18h7l-2 10 11-15h-7z" /></svg>
+        </div>
+        <div>
+          <h1>Firmware Rollout Control Room</h1>
+          <p id="meta" class="meta">connecting…</p>
+        </div>
+      </div>
+
+      <ol id="phases" class="phases"></ol>
+
+      <div class="controls">
+        <label class="speed" title="Duration of one simulated firmware step on the mock stations">
+          <span>Simulation</span>
+          <select id="speed">
+            <option value="400">Fast · 0.4 s/step</option>
+            <option value="1800">Demo · 1.8 s/step</option>
+            <option value="3500">Slow · 3.5 s/step</option>
+          </select>
+        </label>
+        <button id="upload-btn" class="btn ghost" title="Upload OCPP .xlsx exports (or drop them anywhere)">Upload .xlsx</button>
+        <input id="file-input" type="file" accept=".xlsx" multiple hidden />
+        <button id="reset-btn" class="btn ghost" title="Reload the initial station state from the xlsx exports">Reset</button>
+        <button id="analyse-btn" class="btn secondary">Analyse only</button>
+        <button id="run-btn" class="btn primary">Run analysis + rollout</button>
+      </div>
+    </header>
+
+    <section id="runbar" class="runbar"></section>
+
+    <main id="stations" class="stations"></main>
+
+    <section id="terminal" class="terminal">
+      <div id="term-resize" class="term-resize" title="Drag to resize"></div>
+      <div class="term-head">
+        <div class="lights"><i></i><i></i><i></i></div>
+        <div class="term-title">agent@fw-rollout: ~/hackaton-26 — live console <span class="sync">mirrors the server terminal</span></div>
+        <div id="term-filters" class="term-filters"></div>
+        <label class="toggle"><input id="show-frames" type="checkbox" /> OCPP frames</label>
+        <label class="toggle"><input id="autoscroll" type="checkbox" checked /> Autoscroll</label>
+        <button id="term-clear" class="btn tiny ghost">Clear</button>
+        <button id="term-collapse" class="btn tiny ghost" title="Collapse / expand">▾</button>
+      </div>
+      <div id="term-body" class="term-body hide-debug"></div>
+    </section>
+
+    <aside id="drawer" class="drawer" aria-hidden="true">
+      <div class="drawer-head">
+        <div>
+          <h3 id="drawer-title">xlsx</h3>
+          <p id="drawer-sub" class="meta"></p>
+        </div>
+        <button id="drawer-close" class="btn tiny ghost">Close ✕</button>
+      </div>
+      <div id="drawer-filters" class="drawer-filters"></div>
+      <div class="drawer-table-wrap">
+        <table class="rows">
+          <thead>
+            <tr><th>Row</th><th>Time (UTC)</th><th>Type</th><th>Action</th><th>Detail</th></tr>
+          </thead>
+          <tbody id="drawer-rows"></tbody>
+        </table>
+      </div>
+    </aside>
+
+    <div id="drop-overlay" class="drop-overlay"><div>Drop OCPP <b>.xlsx</b> exports to upload them</div></div>
+    <div id="toast" class="toast"></div>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

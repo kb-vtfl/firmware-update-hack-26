@@ -40,6 +40,7 @@ button { font: inherit; color: inherit; }
 .topbar {
   display: flex; align-items: center; gap: 24px; padding: 12px 20px;
   background: rgba(8, 16, 31, 0.85); border-bottom: 1px solid var(--line); backdrop-filter: blur(6px);
+  position: relative; z-index: 15;
 }
 .brand { display: flex; align-items: center; gap: 12px; min-width: 300px; }
 .brand h1 { margin: 0; font-size: 16px; letter-spacing: 0.2px; }
@@ -78,7 +79,26 @@ select { background: var(--panel-2); color: var(--text); border: 1px solid var(-
 .runbar .state.failed { background: rgba(255, 77, 94, 0.14); color: var(--red); }
 .runbar .thinking { color: var(--purple); display: inline-flex; align-items: center; gap: 6px; }
 .runbar .spacer { flex: 1; }
-.runbar .report { font-family: var(--mono); color: var(--muted); font-size: 11px; }
+.runbar .report { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11.5px; }
+a.btn { text-decoration: none; display: inline-block; color: var(--text); }
+
+/* ---------- reports popover ---------- */
+.reports-wrap { position: relative; }
+.reports-pop {
+  position: absolute; top: calc(100% + 8px); right: 0; width: 420px; max-height: 60vh; overflow: auto; z-index: 25;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5); padding: 8px;
+}
+.reports-pop[hidden] { display: none; }
+.rp-title { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase; padding: 4px 8px 8px; }
+.rp-empty { color: var(--muted); padding: 14px; text-align: center; }
+.rp-item { padding: 10px; border-radius: 9px; border: 1px solid var(--line); background: var(--panel-2); display: flex; flex-direction: column; gap: 5px; }
+.rp-item + .rp-item { margin-top: 6px; }
+.rp-head { display: flex; gap: 8px; align-items: baseline; justify-content: space-between; }
+.rp-auto { font: 700 9.5px var(--mono); color: var(--amber); border: 1px solid rgba(255, 176, 32, 0.5); border-radius: 5px; padding: 0 5px; }
+.rp-meta { color: var(--muted); font-size: 11.5px; }
+.rp-verdicts { display: flex; gap: 4px; flex-wrap: wrap; }
+.rp-verdicts .pill { font: 800 9.5px var(--mono); padding: 2px 7px; border-radius: 999px; }
+.rp-links { display: flex; gap: 6px; }
 
 /* ---------- station cards ---------- */
 .stations {

@@ -143,6 +143,10 @@ export function summarizeToolResult(name: string, result: unknown): Outcome {
       return summarizeReboot(r);
     case "post_update_check":
       return summarizePostCheck(r);
+    case "generate_report":
+      if (r["accepted"] === true) return { level: "ok", text: `report ${String(r["reportId"])} saved (HTML, Markdown, JSON)` };
+      if (r["note"]) return { level: "ok", text: String(r["note"]) };
+      return { level: "issue", text: `report rejected: ${list(r["problems"]).length ? (r["problems"] as string[]).join(" ") : "unknown reason"}` };
     default:
       return { level: "ok", text: JSON.stringify(result).slice(0, 200) };
   }

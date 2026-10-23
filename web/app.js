@@ -633,10 +633,59 @@ function renderChrome() {
       thinking +
       `<span class="spacer"></span>` +
       (state.tickets.length ? `<span class="chip bad">${state.tickets.length} ticket(s)</span>` : "") +
-      (run.report ? `<span class="report">report: ${esc(run.report)}</span>` : "") +
+      (run.report ? `<span class="report">Report ${reportLinks(run.report)}</span>` : "") +
       (run.error ? `<span class="chip bad">${esc(run.error)}</span>` : "");
   }
   setHTML($("#runbar"), html);
+}
+
+// ---------- reports ----------
+
+function reportLinks(id) {
+  const base = `/api/reports/${encodeURIComponent(id)}`;
+  return (
+    `<a class="btn tiny" href="${base}/html?inline=1" target="_blank" rel="noopener">View</a>` +
+    `<a class="btn tiny ghost" href="${base}/html" download>HTML</a>` +
+    `<a class="btn tiny ghost" href="${base}/md" download>MD</a>`
+  );
+}
+
+async function renderReports() {
+  const pop = $("#reports-pop");
+  pop.innerHTML = `<div class="rp-empty">Loading…</div>`;
+  try {
+    const res = await fetch("/api/reports", { cache: "no-store" });
+    const { reports = [] } = await res.json();
+    if (!reports.length) {
+      pop.innerHTML = `<div class="rp-empty">No reports yet. Finish a run to generate one.</div>`;
+      return;
+    }
+    pop.innerHTML =
+      `<div class="rp-title">Run reports</div>` +
+      reports
+        .map((r) => {
+          const verdicts = Object.entries(r.verdicts ?? {})
+            .filter(([, n]) => n > 0)
+            .map(([v, n]) => `<span class="pill v-${esc(v)}">${n} ${esc(VERDICT_LABEL[v] ?? v)}</span>`)
+            .join("");
+          return (
+            `<div class="rp-item">` +
+            `<div class="rp-head"><b>${esc(r.headline)}</b>${r.generatedBy === "fallback" ? `<span class="rp-auto" title="The report agent did not finish">auto</span>` : ""}</div>` +
+            `<div class="rp-meta">${esc(fmtDay(r.generatedAt))} UTC · ${r.upgrade ? "analysis + rollout" : "analysis only"} · ${r.stations} station(s)${r.tickets ? ` · ${r.tickets} ticket(s)` : ""}</div>` +
+            `<div class="rp-verdicts">${verdicts}</div>` +
+            `<div class="rp-links">${reportLinks(r.id)}</div>` +
+            `</div>`
+          );
+        })
+        .join("");
+  } catch (err) {
+    pop.innerHTML = `<div class="rp-empty">Could not load reports: ${esc(err.message)}</div>`;
+  }
+}
+
+function toggleReports(open = $("#reports-pop").hidden) {
+  $("#reports-pop").hidden = !open;
+  if (open) renderReports();
 }
 
 // ---------- terminal ----------
@@ -779,12 +828,15 @@ function connect() {
         snapshots = msg.stations;
         renderStations();
         break;
-      case "state":
+      case "state": {
+        const previousReport = state?.run?.report;
         state = msg.state;
         snapshots.forEach(updateCard);
         renderChrome();
+        if (state.run?.report && state.run.report !== previousReport && !$("#reports-pop").hidden) renderReports();
         if ($("#drawer").classList.contains("open")) renderDrawer();
         break;
+      }
       case "log":
         appendLogs([msg.entry]);
         break;
@@ -817,6 +869,10 @@ function wireUi() {
   $("#analyse-btn").onclick = () => api("/api/run", { upgrade: false }).catch((e) => toast(e.message, true));
   $("#reset-btn").onclick = () => api("/api/reset").then(() => toast("Back to the initial state from the xlsx exports")).catch((e) => toast(e.message, true));
   $("#speed").onchange = (e) => api("/api/settings", { firmwareStepMs: Number(e.target.value) }).catch((err) => toast(err.message, true));
+  $("#reports-btn").onclick = () => toggleReports();
+  document.addEventListener("click", (e) => {
+    if (!$("#reports-pop").hidden && !e.target.closest(".reports-wrap")) toggleReports(false);
+  });
   $("#upload-btn").onclick = () => $("#file-input").click();
   $("#file-input").onchange = (e) => uploadFiles(e.target.files).finally(() => (e.target.value = ""));
 
@@ -853,7 +909,11 @@ function wireUi() {
       renderDrawer();
     }
   };
-  document.addEventListener("keydown", (e) => e.key === "Escape" && $("#drawer").classList.remove("open"));
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    $("#drawer").classList.remove("open");
+    toggleReports(false);
+  });
   window.addEventListener("hashchange", openFromHash);
 
   $("#term-filters").onclick = (e) => {

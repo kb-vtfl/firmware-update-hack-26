@@ -1,26 +1,35 @@
 import { basename, join } from "node:path";
 import { runAgent, type AgentRun } from "./agent.js";
-import { ANALYSIS_PROMPT, ANALYSIS_WINDOW_HOURS, OUTPUT_DIR, TARGET_FIRMWARE_VERSION, UPGRADE_PROMPT } from "./config.js";
+import {
+  ANALYSIS_PROMPT,
+  ANALYSIS_WINDOW_HOURS,
+  AZURE_FOUNDRY_DEPLOYMENT,
+  OUTPUT_DIR,
+  REPORT_PROMPT,
+  TARGET_FIRMWARE_VERSION,
+  UPGRADE_PROMPT,
+} from "./config.js";
 import * as dashboard from "./dashboard.js";
 import { log, startRunLog } from "./logger.js";
 import { createMockGateway } from "./mockStation.js";
 import { loadStationLog } from "./ocpp.js";
 import { CALL } from "./ocpp201.js";
-import { writeReport } from "./report.js";
 import type { StationGateway } from "./stationGateway.js";
 import {
   ANALYSIS_TOOLS,
+  REPORT_TOOLS,
   UPGRADE_TOOLS,
+  generateRunReport,
   getFirmwareAttempts,
-  getFirmwareUpdates,
-  getFollowUps,
-  getLiveConnections,
+  getGeneratedReportId,
   getPostChecks,
   getReboots,
   getRecommendations,
   getTickets,
   pendingStations,
   pendingUpgrades,
+  recordAgentStats,
+  reportFacts,
   startRun,
   upgradeCandidates,
 } from "./tools.js";
@@ -45,6 +54,9 @@ function table(header: string[], rows: string[][]): string {
 
 const agentStats = (run: AgentRun, ms: number): string =>
   `${seconds(ms)} · ${run.steps} LLM step(s) · ${run.toolCalls} tool call(s) · tokens in=${run.tokensIn} out=${run.tokensOut}`;
+
+const record = (phase: string, run: AgentRun, ms: number): void =>
+  recordAgentStats({ phase, steps: run.steps, toolCalls: run.toolCalls, tokensIn: run.tokensIn, tokensOut: run.tokensOut, durationMs: ms });
 
 /** Surfaces the live station side of the rollout: firmware progress always, raw frames at LOG_LEVEL=debug. */
 function followOcppTraffic(gateway: StationGateway): () => void {
@@ -125,6 +137,7 @@ async function analyse(): Promise<string> {
   });
 
   const recommendations = getRecommendations();
+  record("Analysis", run, Date.now() - started);
   log.ok(`Analysis finished: ${recommendations.length} recommendation(s) in ${agentStats(run, Date.now() - started)}`);
   log.block(
     table(
@@ -188,6 +201,7 @@ async function rollOut(enabled: boolean): Promise<string> {
   const attempts = getFirmwareAttempts();
   const reboots = getReboots();
   const postChecks = getPostChecks();
+  record("Rollout", run, Date.now() - started);
   log.ok(
     `Rollout finished: ${attempts.length} UpdateFirmware attempt(s), ${reboots.length} recovery reboot(s) in ${agentStats(run, Date.now() - started)}`,
   );
@@ -228,28 +242,55 @@ async function rollOut(enabled: boolean): Promise<string> {
   return run.text;
 }
 
-async function report(runLogPath: string, agentSummary: string): Promise<string> {
-  log.phase(4, PHASES, "REPORT", "write the run report");
-  dashboard.setPhase("REPORT");
-  log.do("writing Markdown + JSON report");
-  const files = await writeReport({
-    recommendations: getRecommendations(),
-    tickets: getTickets(),
-    liveConnections: getLiveConnections(),
-    firmwareUpdates: getFirmwareUpdates(),
-    firmwareAttempts: getFirmwareAttempts(),
-    reboots: getReboots(),
-    postChecks: getPostChecks(),
-    followUps: getFollowUps(),
-    agentSummary,
+/** Used when the report agent fails: same report, narrative stitched together from the earlier agent output. */
+async function fallbackReport(analysisSummary: string, rolloutSummary: string): Promise<string> {
+  const { kpis } = reportFacts();
+  const nextActions = [...new Set(getRecommendations().flatMap((r) => r.nextActions.map((a) => `${r.stationId}: ${a}`)))];
+  const { reportId } = await generateRunReport({
+    headline: `${kpis.stations} station(s) checked · ${kpis.installed} upgraded · ${kpis.failed} failed · ${kpis.tickets} ticket(s)`,
+    executiveSummary: `${analysisSummary}\n\n${rolloutSummary}`,
+    stationHighlights: {},
+    risks: [],
+    nextActions,
+    generatedBy: "fallback",
   });
-  log.ok(`report: ${files.markdown}`);
+  return reportId;
+}
+
+async function report(runLogPath: string, analysisSummary: string, rolloutSummary: string): Promise<string> {
+  log.phase(4, PHASES, "REPORT", "agent writes the run summary report");
+  dashboard.setPhase("REPORT");
+  log.plan("Agent summarises the run for operations and stores the report (HTML, Markdown, JSON) for download");
+
+  const started = Date.now();
+  try {
+    const run = await runAgent({
+      instructions: REPORT_PROMPT,
+      query:
+        `Write the summary report for this run by calling generate_report.\n\n` +
+        `## Analysis phase summary\n${analysisSummary}\n\n## Rollout phase summary\n${rolloutSummary}\n\n` +
+        `## Run facts (verified, JSON)\n${JSON.stringify(reportFacts())}`,
+      tools: REPORT_TOOLS,
+      pending: () => (getGeneratedReportId() ? [] : ["generate_report"]),
+      reminder: () => "You have not generated the report yet. Call generate_report now.",
+    });
+    log.ok(`Report agent finished in ${agentStats(run, Date.now() - started)}`);
+  } catch (err) {
+    log.warn(`Report agent failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  let reportId = getGeneratedReportId();
+  if (!reportId) {
+    log.warn("No report from the agent — generating it from the run state instead");
+    reportId = await fallbackReport(analysisSummary, rolloutSummary);
+  }
+  log.ok(`report: ${join(OUTPUT_DIR, "reports", reportId)} (download in the dashboard)`);
   log.ok(`run log (JSON lines): ${runLogPath}`);
 
   const tickets = getTickets();
   if (tickets.length) for (const t of tickets) log.info(`ticket ${t.id}: ${t.title}`, t.stationId);
   else log.info("no tickets created");
-  return files.markdown;
+  return reportId;
 }
 
 /** One end-to-end run: ingest → analysis → upgrade → report. */
@@ -258,6 +299,7 @@ export async function runPipeline(files: string[], options: PipelineOptions): Pr
   const runLogPath = join(OUTPUT_DIR, "runs", `run-${stamp}.jsonl`);
   startRunLog(runLogPath);
   const started = Date.now();
+  const startedAt = new Date(started).toISOString();
 
   log.banner(`Firmware readiness run ${stamp}`, `trigger: ${options.trigger} · ${files.length} file(s)`);
   dashboard.startRun(stamp, options.trigger, options.upgrade);
@@ -271,15 +313,23 @@ export async function runPipeline(files: string[], options: PipelineOptions): Pr
 
   const gateway = createMockGateway(stations);
   const stopFollowing = followOcppTraffic(gateway);
-  startRun(stations, gateway);
+  startRun(stations, gateway, {
+    runId: stamp,
+    trigger: options.trigger,
+    upgrade: options.upgrade,
+    startedAt,
+    inputFiles: stations.map((s) => basename(s.sourceFile)),
+    model: AZURE_FOUNDRY_DEPLOYMENT,
+    targetFirmwareVersion: TARGET_FIRMWARE_VERSION ?? null,
+  });
   log.ok(`OCPP 2.0.1 gateway (mock) has a link to ${stations.length} station(s)`);
 
   try {
     const analysisSummary = await analyse();
     const rolloutSummary = await rollOut(options.upgrade);
-    const reportPath = await report(runLogPath, `### Analysis\n\n${analysisSummary}\n\n### Rollout\n\n${rolloutSummary}`);
+    const reportId = await report(runLogPath, analysisSummary, rolloutSummary);
     log.banner(`Run finished in ${seconds(Date.now() - started)}`);
-    dashboard.finishRun("finished", { report: reportPath });
+    dashboard.finishRun("finished", { report: reportId });
   } catch (err) {
     dashboard.finishRun("failed", { error: err instanceof Error ? err.message : String(err) });
     throw err;

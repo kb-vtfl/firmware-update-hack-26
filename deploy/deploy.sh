@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds the dashboard image and deploys it as a public Azure Container App.
 # Usage: npm run deploy:azure   (or: bash deploy/deploy.sh)
-# Overrides: RG, APP_NAME, ACR_NAME, ENV_NAME, IMAGE_NAME, TAG, ENV_FILE, BUILD_MODE=acr|local
+# Overrides: RG, APP_NAME, ACR_NAME, ENV_NAME, IMAGE_NAME, TAG, ENV_FILE, BUILD_MODE=acr|local,
+#            PERSIST_OUTPUT=1|0, STORAGE_ACCOUNT, SHARE_NAME (the last three may also be set in the env file)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -15,6 +16,8 @@ TAG="${TAG:-$(date +%Y%m%d%H%M%S)}"
 ENV_FILE="${ENV_FILE:-.env}"
 BUILD_MODE="${BUILD_MODE:-acr}"
 TARGET_PORT=3000
+OUTPUT_MOUNT_PATH=/app/output
+ENV_STORAGE_NAME=fw-rollout-output
 
 step() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 fail() { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -29,6 +32,14 @@ env_value() {
   value="${value#\'}"; value="${value%\'}"
   printf '%s' "$value"
 }
+
+# Reports, tickets, follow-ups and run logs live in output/; without a mount they vanish on every redeploy.
+PERSIST_OUTPUT="${PERSIST_OUTPUT:-$(env_value PERSIST_OUTPUT)}"
+PERSIST_OUTPUT="${PERSIST_OUTPUT:-1}"
+STORAGE_ACCOUNT="${STORAGE_ACCOUNT:-$(env_value STORAGE_ACCOUNT)}"
+STORAGE_ACCOUNT="${STORAGE_ACCOUNT:-fwrollout$(printf '%s' "$RG" | tr -cd 'a-z0-9' | tail -c 15)}"
+SHARE_NAME="${SHARE_NAME:-$(env_value SHARE_NAME)}"
+SHARE_NAME="${SHARE_NAME:-fw-rollout-output}"
 
 step "Pre-flight checks"
 command -v az >/dev/null || fail "Azure CLI (az) is not installed"
@@ -83,8 +94,41 @@ else
     -o none
 fi
 
+if [[ "$PERSIST_OUTPUT" != "0" ]]; then
+  step "Persistent output: Azure Files share $STORAGE_ACCOUNT/$SHARE_NAME -> $OUTPUT_MOUNT_PATH"
+  [[ "$STORAGE_ACCOUNT" =~ ^[a-z0-9]{3,24}$ ]] || fail "STORAGE_ACCOUNT must be 3-24 lowercase letters/digits (got $STORAGE_ACCOUNT)"
+  command -v node >/dev/null || fail "node is needed to patch the Container App definition"
+  if ! az storage account show -n "$STORAGE_ACCOUNT" -g "$RG" -o none 2>/dev/null; then
+    az storage account create -n "$STORAGE_ACCOUNT" -g "$RG" \
+      --sku Standard_LRS --kind StorageV2 --min-tls-version TLS1_2 --allow-blob-public-access false -o none
+  fi
+  if ! az storage share-rm show --storage-account "$STORAGE_ACCOUNT" -g "$RG" -n "$SHARE_NAME" -o none 2>/dev/null; then
+    az storage share-rm create --storage-account "$STORAGE_ACCOUNT" -g "$RG" -n "$SHARE_NAME" --quota 5 -o none
+  fi
+  STORAGE_KEY="$(az storage account keys list -n "$STORAGE_ACCOUNT" -g "$RG" --query '[0].value' -o tsv)"
+  az containerapp env storage set -n "$ENV_NAME" -g "$RG" \
+    --storage-name "$ENV_STORAGE_NAME" --storage-type AzureFile \
+    --azure-file-account-name "$STORAGE_ACCOUNT" --azure-file-account-key "$STORAGE_KEY" \
+    --azure-file-share-name "$SHARE_NAME" --access-mode ReadWrite -o none
+
+  APP_DEF_DIR="$(mktemp -d)"
+  trap 'rm -rf "$APP_DEF_DIR"' EXIT
+  APP_DEF="$APP_DEF_DIR/app.json"
+  az containerapp show -n "$APP_NAME" -g "$RG" -o json > "$APP_DEF"
+  set +e
+  node deploy/add-output-volume.mjs "$APP_DEF" "$ENV_STORAGE_NAME" "$OUTPUT_MOUNT_PATH"
+  patched=$?
+  set -e
+  case "$patched" in
+    0) az containerapp update -n "$APP_NAME" -g "$RG" --yaml "$APP_DEF" -o none ;;
+    3) echo "Volume already mounted at $OUTPUT_MOUNT_PATH" ;;
+    *) fail "Could not patch the Container App definition" ;;
+  esac
+fi
+
 FQDN="$(az containerapp show -n "$APP_NAME" -g "$RG" --query properties.configuration.ingress.fqdn -o tsv)"
 step "Deployed"
 echo "Dashboard: https://$FQDN"
+if [[ "$PERSIST_OUTPUT" != "0" ]]; then echo "Output:    Azure Files $STORAGE_ACCOUNT/$SHARE_NAME mounted at $OUTPUT_MOUNT_PATH"; fi
 echo "Logs:      az containerapp logs show -n $APP_NAME -g $RG --follow"
 echo "Remove:    az containerapp delete -n $APP_NAME -g $RG --yes"

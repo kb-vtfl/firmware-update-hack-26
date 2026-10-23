@@ -17,6 +17,16 @@ import {
   sessions,
   stationOverview,
 } from "./ocpp.js";
+import {
+  buildRunSummary,
+  type AgentStats,
+  type ReportNarrative,
+  type RunContext,
+  type RunFacts,
+  type RunSummary,
+  type StationSummary,
+} from "./report.js";
+import { downloadPaths, saveReport } from "./reportStore.js";
 import { checkLiveConnection, firmwareLocation, rebootStation, updateFirmware } from "./stationCommands.js";
 import type { StationGateway } from "./stationGateway.js";
 import { createTicket } from "./tickets.js";
@@ -49,11 +59,17 @@ const liveConnections = new Map<string, LiveConnectionResult>();
 const firmwareAttempts = new Map<string, FirmwareUpdateResult[]>();
 const reboots = new Map<string, RebootResult[]>();
 const postChecks = new Map<string, PostUpdateCheckResult>();
+let runContext: RunContext | undefined;
+let agentStats: AgentStats[] = [];
+let generatedReportId: string | undefined;
 
 /** Resets all per-run state; called once per batch of uploaded files. */
-export function startRun(logs: StationLog[], stationGateway: StationGateway): void {
+export function startRun(logs: StationLog[], stationGateway: StationGateway, context: RunContext): void {
   stations = logs;
   gateway = stationGateway;
+  runContext = context;
+  agentStats = [];
+  generatedReportId = undefined;
   tickets.clear();
   recommendations.clear();
   liveConnections.clear();
@@ -61,6 +77,12 @@ export function startRun(logs: StationLog[], stationGateway: StationGateway): vo
   reboots.clear();
   postChecks.clear();
 }
+
+export function recordAgentStats(stats: AgentStats): void {
+  agentStats.push(stats);
+}
+
+export const getGeneratedReportId = (): string | undefined => generatedReportId;
 
 export const getTickets = (): Ticket[] => [...tickets.values()];
 export const getRecommendations = (): Recommendation[] => [...recommendations.values()];
@@ -346,6 +368,78 @@ function runSubmitRecommendation(args: Record<string, unknown>): unknown {
   return { accepted: true, stillPending: pendingStations() };
 }
 
+function runFacts(): RunFacts {
+  return {
+    stations: stations.map((s) => {
+      const firmware = firmwareInfo(s);
+      return { stationId: s.stationId, firmwareVersion: typeof firmware["firmwareVersion"] === "string" ? firmware["firmwareVersion"] : "unknown" };
+    }),
+    recommendations: getRecommendations(),
+    firmwareAttempts: getFirmwareAttempts(),
+    reboots: getReboots(),
+    postChecks: getPostChecks(),
+    tickets: getTickets(),
+    followUps: getFollowUps(),
+    agentStats: [...agentStats],
+  };
+}
+
+function requireRunContext(): RunContext {
+  if (!runContext) throw new Error("No run in progress");
+  return runContext;
+}
+
+/** The verified facts of the current run without any narrative; this is what the report agent writes about. */
+export function reportFacts(): Pick<RunSummary, "run" | "kpis" | "tickets" | "followUps"> & {
+  stations: Array<Omit<StationSummary, "highlight"> & { analysisNote: string }>;
+} {
+  const empty: ReportNarrative = { headline: "", executiveSummary: "", stationHighlights: {}, risks: [], nextActions: [], generatedBy: "fallback" };
+  const { run, kpis, stations: summaries, tickets: ticketList, followUps } = buildRunSummary(requireRunContext(), runFacts(), empty);
+  return { run, kpis, tickets: ticketList, followUps, stations: summaries.map(({ highlight, ...facts }) => ({ ...facts, analysisNote: highlight })) };
+}
+
+/** Builds and stores the run report; used by the generate_report tool and by the pipeline's fallback. */
+export async function generateRunReport(narrative: ReportNarrative): Promise<{ reportId: string; downloads: Record<string, string> }> {
+  const summary = buildRunSummary(requireRunContext(), runFacts(), narrative);
+  const { id } = await saveReport(summary);
+  generatedReportId = id;
+  return { reportId: id, downloads: downloadPaths(id) };
+}
+
+async function runGenerateReport(args: Record<string, unknown>): Promise<unknown> {
+  if (generatedReportId) return { note: "The report for this run was already generated.", reportId: generatedReportId };
+
+  const headline = text(args, "headline");
+  const executiveSummary = text(args, "executiveSummary");
+  const highlights = Array.isArray(args["stationHighlights"]) ? (args["stationHighlights"] as Array<Record<string, unknown>>) : [];
+  const stationHighlights: Record<string, string> = {};
+  const problems: string[] = [];
+  const known = new Map(stations.map((s) => [s.stationId.toLowerCase(), s.stationId]));
+
+  for (const h of highlights) {
+    const id = known.get(text(h, "stationId").toLowerCase());
+    const highlight = text(h, "highlight");
+    if (!id) problems.push(`Unknown stationId "${text(h, "stationId")}" in stationHighlights.`);
+    else if (!highlight) problems.push(`Empty highlight for ${id}.`);
+    else stationHighlights[id] = highlight;
+  }
+  const missing = stations.map((s) => s.stationId).filter((id) => !stationHighlights[id]);
+  if (missing.length) problems.push(`stationHighlights must cover every station; missing: ${missing.join(", ")}.`);
+  if (!headline) problems.push("headline is required.");
+  if (!executiveSummary) problems.push("executiveSummary is required.");
+  if (problems.length > 0) return { accepted: false, problems };
+
+  const result = await generateRunReport({
+    headline,
+    executiveSummary,
+    stationHighlights,
+    risks: textList(args, "risks"),
+    nextActions: textList(args, "nextActions"),
+    generatedBy: "agent",
+  });
+  return { accepted: true, ...result };
+}
+
 // --- tool schemas ---
 
 const stationIdParam = { type: "string", description: "Station chargeBoxId, as returned by list_stations." };
@@ -521,6 +615,39 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
       `StatusNotifications. Also schedules the ${FOLLOW_UP_DELAY_HOURS}h follow-up that repeats the pre-update rules.`,
     parameters: { type: "object", properties: { stationId: stationIdParam }, required: ["stationId"] },
   },
+  {
+    type: "function",
+    name: "generate_report",
+    description:
+      "Generates and stores the downloadable run summary report (HTML, Markdown, JSON). You write only the narrative; " +
+      "the station table, key figures, tickets and follow-ups are filled in from the verified run state. Requires one " +
+      "highlight per station. Call it exactly once; returns the reportId and download paths.",
+    parameters: {
+      type: "object",
+      properties: {
+        headline: { type: "string", description: "One-line outcome of the run, e.g. \"1 of 3 stations upgraded, 1 ticket raised\"." },
+        executiveSummary: {
+          type: "string",
+          description: "3-5 sentences for an operations manager: what was checked, what was rolled out, what failed and why.",
+        },
+        stationHighlights: {
+          type: "array",
+          description: "Exactly one entry per station.",
+          items: {
+            type: "object",
+            properties: {
+              stationId: stationIdParam,
+              highlight: { type: "string", description: "One sentence: the deciding reason and the end state of this station." },
+            },
+            required: ["stationId", "highlight"],
+          },
+        },
+        risks: { type: "array", items: { type: "string" }, description: "Open risks operations should know about (may be empty)." },
+        nextActions: { type: "array", items: { type: "string" }, description: "Concrete next steps, most urgent first." },
+      },
+      required: ["headline", "executiveSummary", "stationHighlights", "risks", "nextActions"],
+    },
+  },
 ];
 
 const INTENT_PARAM = {
@@ -567,6 +694,9 @@ export const UPGRADE_TOOLS = toolSet([
   "post_update_check",
   "create_ticket",
 ]);
+
+/** Phase 4: summarise the run into the downloadable report. */
+export const REPORT_TOOLS = toolSet(["generate_report"]);
 
 /** Stations that passed analysis and may be upgraded. */
 export const upgradeCandidates = (): Recommendation[] =>
@@ -622,6 +752,8 @@ export async function executeTool(name: string, args: Record<string, unknown>): 
       return runRebootStation(args);
     case "post_update_check":
       return runPostUpdateCheck(args);
+    case "generate_report":
+      return runGenerateReport(args);
     default:
       return { error: `Unknown tool: ${name}` };
   }

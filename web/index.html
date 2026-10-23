@@ -30,6 +30,10 @@
             <option value="3500">Slow · 3.5 s/step</option>
           </select>
         </label>
+        <div class="reports-wrap">
+          <button id="reports-btn" class="btn ghost" title="Summary reports of earlier runs">Reports</button>
+          <div id="reports-pop" class="reports-pop" hidden></div>
+        </div>
         <button id="upload-btn" class="btn ghost" title="Upload OCPP .xlsx exports (or drop them anywhere)">Upload .xlsx</button>
         <input id="file-input" type="file" accept=".xlsx" multiple hidden />
         <button id="reset-btn" class="btn ghost" title="Reload the initial station state from the xlsx exports">Reset</button>

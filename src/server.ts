@@ -9,6 +9,7 @@ import { assertLlmConfigured } from "./llm.js";
 import { addLogSink, log, type LogEntry } from "./logger.js";
 import { loadStationLog } from "./ocpp.js";
 import { runPipeline } from "./pipeline.js";
+import { listReports, readReport, type ReportFormat } from "./reportStore.js";
 import { FAILURE_MODES, type FailureMode } from "./simulation.js";
 
 /** Browser dashboard: static UI + Server-Sent Events carrying the same log lines the console prints. */
@@ -25,6 +26,13 @@ const CONTENT_TYPES: Record<string, string> = {
   ".svg": "image/svg+xml",
   ".png": "image/png",
   ".ico": "image/x-icon",
+};
+
+const REPORT_ROUTE = /^\/api\/reports\/([\w-]+)\/(html|md|json)$/;
+const REPORT_CONTENT_TYPES: Record<ReportFormat, string> = {
+  html: "text/html; charset=utf-8",
+  md: "text/markdown; charset=utf-8",
+  json: "application/json; charset=utf-8",
 };
 
 const clients = new Set<ServerResponse>();
@@ -96,6 +104,18 @@ async function serveStatic(res: ServerResponse, urlPath: string): Promise<void> 
   }
 }
 
+async function serveReport(res: ServerResponse, id: string, format: ReportFormat, inline: boolean): Promise<void> {
+  const body = await readReport(id, format);
+  if (!body) return sendJson(res, 404, { error: "report not found" });
+  const disposition = inline ? "inline" : "attachment";
+  res.writeHead(200, {
+    "Content-Type": REPORT_CONTENT_TYPES[format],
+    "Content-Disposition": `${disposition}; filename="fw-rollout-report-${id}.${format}"`,
+    "Cache-Control": "no-store",
+  });
+  res.end(body);
+}
+
 function openEventStream(req: IncomingMessage, res: ServerResponse): void {
   res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
   res.write(
@@ -120,9 +140,14 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
   const route = `${req.method} ${url.pathname}`;
 
+  const reportMatch = req.method === "GET" ? REPORT_ROUTE.exec(url.pathname) : null;
+  if (reportMatch) return serveReport(res, reportMatch[1] ?? "", reportMatch[2] as ReportFormat, url.searchParams.get("inline") === "1");
+
   switch (route) {
     case "GET /api/events":
       return openEventStream(req, res);
+    case "GET /api/reports":
+      return sendJson(res, 200, { reports: await listReports() });
     case "POST /api/run": {
       if (running) return sendJson(res, 409, { error: "A run is already in progress" });
       try {
